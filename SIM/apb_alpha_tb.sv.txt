@@ -1,0 +1,1040 @@
+//=============================================================================
+// Alpha Test - APB Master Unit Level Verification (Unified TB)
+//=============================================================================
+// Purpose: Verify APB protocol rules and FSM behavior
+// DUT: APB_Master only (with BFM slaves)
+// This unified testbench includes: Top module, Interface, UVM TB, Assertions, Coverage
+//=============================================================================
+
+`include "uvm_macros.svh"
+import uvm_pkg::*;
+
+//=============================================================================
+// APB Transaction for Alpha Test
+//=============================================================================
+class apb_alpha_transaction extends uvm_sequence_item;
+    
+    // CPU Interface (input to APB_Master)
+    rand logic        transfer;
+    rand logic        write;
+    rand logic [31:0] addr;
+    rand logic [31:0] wdata;
+    
+    // APB Protocol Response (output from APB_Master)
+    logic [31:0] rdata;
+    logic        ready;
+    
+    // APB Protocol Signals (for monitoring)
+    logic [31:0] paddr;
+    logic        pwrite;
+    logic        penable;
+    logic [31:0] pwdata;
+    logic [4:0]  psel;
+    
+    // Constraints for focused testing with better distribution
+    constraint addr_c {
+        addr dist {[32'h1000_0000:32'h1000_0FFF] := 20,  // RAM
+                   [32'h1000_1000:32'h1000_1FFF] := 20,  // GPO
+                   [32'h1000_2000:32'h1000_2FFF] := 20,  // GPI
+                   [32'h1000_3000:32'h1000_3FFF] := 20,  // GPIO
+                   [32'h1000_4000:32'h1000_4FFF] := 20}; // UART
+    }
+    
+    constraint transfer_c {
+        transfer dist {1 := 80, 0 := 20};
+    }
+    
+    `uvm_object_utils_begin(apb_alpha_transaction)
+        `uvm_field_int(transfer, UVM_ALL_ON)
+        `uvm_field_int(write,    UVM_ALL_ON)
+        `uvm_field_int(addr,     UVM_ALL_ON)
+        `uvm_field_int(wdata,    UVM_ALL_ON)
+        `uvm_field_int(rdata,    UVM_ALL_ON)
+        `uvm_field_int(ready,    UVM_ALL_ON)
+    `uvm_object_utils_end
+    
+    function new(string name = "apb_alpha_transaction");
+        super.new(name);
+    endfunction
+    
+endclass
+
+//=============================================================================
+// Alpha Test Interface
+//=============================================================================
+interface apb_alpha_interface(input logic clk);
+    
+    // System reset signal
+    logic        preset_n;
+    
+    // CPU Interface to APB_Master
+    logic        transfer;
+    logic        write;
+    logic [31:0] addr;
+    logic [31:0] wdata;
+    logic [31:0] rdata;
+    logic        ready;
+    
+    // APB Protocol Signals (for monitoring)
+    logic [31:0] paddr;
+    logic        pwrite;
+    logic        penable;
+    logic [31:0] pwdata;
+    logic        psel0, psel1, psel2, psel3, psel4;
+    
+    // BFM Slave Response Signals (controlled by testbench)
+    logic [31:0] prdata0, prdata1, prdata2, prdata3, prdata4;
+    logic        pready0, pready1, pready2, pready3, pready4;
+    
+    // Driver clocking block
+    clocking driver_cb @(posedge clk);
+        default input #1 output #0;
+        output transfer, write, addr, wdata;
+        output prdata0, prdata1, prdata2, prdata3, prdata4;
+        output pready0, pready1, pready2, pready3, pready4;
+        input  rdata, ready, preset_n;
+    endclocking
+    
+    // Monitor clocking block
+    clocking monitor_cb @(posedge clk);
+        default input #1;
+        input preset_n, transfer, write, addr, wdata, rdata, ready;
+        input paddr, pwrite, penable, pwdata;
+        input psel0, psel1, psel2, psel3, psel4;
+        input prdata0, prdata1, prdata2, prdata3, prdata4;
+        input pready0, pready1, pready2, pready3, pready4;
+    endclocking
+    
+    modport DRIVER  (clocking driver_cb);
+    modport MONITOR (clocking monitor_cb);
+    
+endinterface
+
+//=============================================================================
+// Alpha Test Driver (CPU BFM)
+//=============================================================================
+class apb_alpha_driver extends uvm_driver #(apb_alpha_transaction);
+    `uvm_component_utils(apb_alpha_driver)
+    
+    virtual apb_alpha_interface vif;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        if (!uvm_config_db#(virtual apb_alpha_interface)::get(this, "", "vif", vif))
+            `uvm_fatal("NOVIF", "Virtual interface not set for Alpha Driver")
+    endfunction
+    
+    task run_phase(uvm_phase phase);
+        apb_alpha_transaction req;
+        
+        // Wait for reset release
+        @(posedge vif.driver_cb.preset_n);
+        @(vif.driver_cb);  // Wait one clock cycle after reset release
+        
+        // Initialize all signals  
+        vif.driver_cb.transfer <= 0;
+        vif.driver_cb.write    <= 0;
+        vif.driver_cb.addr     <= 0;
+        vif.driver_cb.wdata    <= 0;
+        
+        // Initialize BFM slaves to known values
+        vif.driver_cb.prdata0 <= 32'h12345678;
+        vif.driver_cb.prdata1 <= 32'hABCDEF00;
+        vif.driver_cb.prdata2 <= 32'h55AA55AA;
+        vif.driver_cb.prdata3 <= 32'hDEADBEEF;
+        vif.driver_cb.prdata4 <= 32'hCAFEBABE;
+        vif.driver_cb.pready0 <= 1;
+        vif.driver_cb.pready1 <= 1;
+        vif.driver_cb.pready2 <= 1;
+        vif.driver_cb.pready3 <= 1;
+        vif.driver_cb.pready4 <= 1;
+        
+        // Wait for reset deassertion by checking ready signal behavior
+        repeat(5) @(vif.driver_cb);
+        `uvm_info("DRIVER", "Driver initialization completed", UVM_LOW)
+        
+        forever begin
+            seq_item_port.get_next_item(req);
+            drive_transaction(req);
+            seq_item_port.item_done();
+        end
+    endtask
+    
+    task drive_transaction(apb_alpha_transaction req);
+        // Setup BFM slave responses before transaction
+        setup_bfm_slaves(req);
+        
+        if (req.transfer) begin
+            // Drive transaction signals
+            @(vif.driver_cb);
+            vif.driver_cb.transfer <= 1;
+            vif.driver_cb.write    <= req.write;
+            vif.driver_cb.addr     <= req.addr;
+            vif.driver_cb.wdata    <= req.wdata;
+            
+            // Wait for transaction completion
+            wait(vif.driver_cb.ready == 1);
+            req.rdata = vif.driver_cb.rdata;
+            
+            // Deassert transfer after completion
+            @(vif.driver_cb);
+            vif.driver_cb.transfer <= 0;
+            
+            // Wait one more cycle for clean separation
+            @(vif.driver_cb);
+        end else begin
+            // Idle cycle
+            @(vif.driver_cb);
+            vif.driver_cb.transfer <= 0;
+        end
+    endtask
+    
+    task setup_bfm_slaves(apb_alpha_transaction req);
+        // Generate predictable responses based on address
+        case (req.addr[15:12])
+            4'h0: vif.driver_cb.prdata0 <= req.write ? 32'h0 : (req.addr + 32'h1000_0000); // RAM
+            4'h1: vif.driver_cb.prdata1 <= req.write ? 32'h0 : (req.addr + 32'h2000_0000); // GPO
+            4'h2: vif.driver_cb.prdata2 <= req.write ? 32'h0 : (req.addr + 32'h3000_0000); // GPI
+            4'h3: vif.driver_cb.prdata3 <= req.write ? 32'h0 : (req.addr + 32'h4000_0000); // GPIO
+            4'h4: vif.driver_cb.prdata4 <= req.write ? 32'h0 : (req.addr + 32'h5000_0000); // UART
+        endcase
+        
+        // Occasionally introduce wait states (10% chance)
+        if ($urandom_range(0,9) < 1) begin
+            vif.driver_cb.pready0 <= 0;
+            vif.driver_cb.pready1 <= 0;
+            vif.driver_cb.pready2 <= 0;
+            vif.driver_cb.pready3 <= 0;
+            vif.driver_cb.pready4 <= 0;
+            repeat($urandom_range(1,2)) @(vif.driver_cb);
+        end
+        
+        // Always end with ready asserted
+        vif.driver_cb.pready0 <= 1;
+        vif.driver_cb.pready1 <= 1;
+        vif.driver_cb.pready2 <= 1;
+        vif.driver_cb.pready3 <= 1;
+        vif.driver_cb.pready4 <= 1;
+    endtask
+    
+endclass
+
+//=============================================================================
+// Alpha Test Monitor
+//=============================================================================
+class apb_alpha_monitor extends uvm_monitor;
+    `uvm_component_utils(apb_alpha_monitor)
+    
+    virtual apb_alpha_interface vif;
+    uvm_analysis_port #(apb_alpha_transaction) ap;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        ap = new("ap", this);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        if (!uvm_config_db#(virtual apb_alpha_interface)::get(this, "", "vif", vif))
+            `uvm_fatal("NOVIF", "Virtual interface not set for Alpha Monitor")
+    endfunction
+    
+    task run_phase(uvm_phase phase);
+        apb_alpha_transaction trans;
+        
+        forever begin
+            trans = apb_alpha_transaction::type_id::create("trans");
+            collect_transaction(trans);
+            ap.write(trans);
+        end
+    endtask
+    
+    task collect_transaction(apb_alpha_transaction trans);
+        // Wait for transfer start
+        @(vif.monitor_cb iff (vif.monitor_cb.transfer == 1));
+        
+        // Capture transaction
+        trans.transfer = vif.monitor_cb.transfer;
+        trans.write    = vif.monitor_cb.write;
+        trans.addr     = vif.monitor_cb.addr;
+        trans.wdata    = vif.monitor_cb.wdata;
+        trans.paddr    = vif.monitor_cb.paddr;
+        trans.pwrite   = vif.monitor_cb.pwrite;
+        trans.penable  = vif.monitor_cb.penable;
+        trans.pwdata   = vif.monitor_cb.pwdata;
+        
+        // Wait for completion
+        @(vif.monitor_cb iff (vif.monitor_cb.ready == 1));
+        trans.rdata = vif.monitor_cb.rdata;
+        trans.ready = vif.monitor_cb.ready;
+    endtask
+    
+endclass
+
+//=============================================================================
+// Alpha Test Agent (Standard UVM Structure)
+//=============================================================================
+class apb_alpha_agent extends uvm_agent;
+    `uvm_component_utils(apb_alpha_agent)
+    
+    apb_alpha_driver  m_driver;
+    apb_alpha_monitor m_monitor;
+    uvm_sequencer #(apb_alpha_transaction) m_sequencer;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        
+        m_driver    = apb_alpha_driver::type_id::create("m_driver", this);
+        m_monitor   = apb_alpha_monitor::type_id::create("m_monitor", this);
+        m_sequencer = uvm_sequencer#(apb_alpha_transaction)::type_id::create("m_sequencer", this);
+    endfunction
+    
+    function void connect_phase(uvm_phase phase);
+        super.connect_phase(phase);
+        // driver와 sequencer의 TLM 포트 연결
+        m_driver.seq_item_port.connect(m_sequencer.seq_item_export);
+    endfunction
+    
+endclass
+
+//=============================================================================
+// Alpha Test Environment (Standard UVM Structure)
+//=============================================================================
+class apb_alpha_env extends uvm_env;
+    `uvm_component_utils(apb_alpha_env)
+    
+    apb_alpha_agent m_agent;  // Standard: Environment contains Agent
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        m_agent = apb_alpha_agent::type_id::create("m_agent", this);
+    endfunction
+    
+endclass
+
+//=============================================================================
+// Alpha Test Sequences
+//=============================================================================
+
+// Basic smoke test sequence
+class apb_alpha_smoke_sequence extends uvm_sequence #(apb_alpha_transaction);
+    `uvm_object_utils(apb_alpha_smoke_sequence)
+    
+    int num_transactions = 10; // Default value
+    
+    function new(string name = "apb_alpha_smoke_sequence");
+        super.new(name);
+    endfunction
+    
+    task body();
+        apb_alpha_transaction req;
+        
+        // Multiple write transactions
+        req = apb_alpha_transaction::type_id::create("req");
+        for (int i = 0; i < num_transactions; i++) begin
+            start_item(req);
+            assert(req.randomize() with {
+                transfer == 1;
+                write == 1;
+                //addr == 32'h1000_0000;
+            });
+            `uvm_info("ALPHA_SMOKE", $sformatf("Write Transaction %0d: addr=0x%08h, wdata=0x%08h", i, req.addr, req.wdata), UVM_LOW)
+            finish_item(req);
+        end
+        
+        // Multiple read transactions
+        req = apb_alpha_transaction::type_id::create("req");
+        for (int i = 0; i < num_transactions; i++) begin
+            start_item(req);
+            assert(req.randomize() with {
+                transfer == 1;
+                write == 0;
+                //addr == 32'h1000_0000;
+            });
+            `uvm_info("ALPHA_SMOKE", $sformatf("Read Transaction %0d: addr=0x%08h", i, req.addr), UVM_LOW)
+            finish_item(req);
+        end
+        
+        `uvm_info("ALPHA_SMOKE", "Smoke test completed", UVM_LOW)
+    endtask
+    
+endclass
+
+// Protocol compliance test sequence
+class apb_alpha_protocol_sequence extends uvm_sequence #(apb_alpha_transaction);
+    `uvm_object_utils(apb_alpha_protocol_sequence)
+    
+    function new(string name = "apb_alpha_protocol_sequence");
+        super.new(name);
+    endfunction
+    
+    task body();
+        repeat(100) begin
+            apb_alpha_transaction req = apb_alpha_transaction::type_id::create("req");
+            start_item(req);
+            assert(req.randomize());
+            finish_item(req);
+        end
+        
+        `uvm_info("ALPHA_PROTOCOL", "Protocol test completed", UVM_LOW)
+    endtask
+    
+endclass
+
+//=============================================================================
+// Error Injection Sequence - Intentionally violates APB protocol
+//=============================================================================
+class apb_error_injection_sequence extends uvm_sequence #(apb_alpha_transaction);
+    `uvm_object_utils(apb_error_injection_sequence)
+    
+    // Error injection control
+    typedef enum {
+        ERR_NONE,
+        ERR_PSEL_ONEHOT,      // Multiple PSEL violation
+        ERR_ADDR_UNSTABLE,     // Address change during transaction
+        ERR_WDATA_UNSTABLE     // Write data change during ACCESS
+    } error_type_e;
+    
+    error_type_e inject_error = ERR_NONE;
+    
+    function new(string name = "apb_error_injection_sequence");
+        super.new(name);
+    endfunction
+    
+    task body();
+        apb_alpha_transaction req;
+        
+        `uvm_info("ERROR_SEQ", "=== Starting Error Injection Sequence ===", UVM_LOW)
+        `uvm_info("ERROR_SEQ", $sformatf("Error Type: %s", inject_error.name()), UVM_LOW)
+        
+        // Run several normal transactions first
+        `uvm_info("ERROR_SEQ", "Running normal transactions first...", UVM_LOW)
+        repeat(2) begin
+            req = apb_alpha_transaction::type_id::create("req");
+            start_item(req);
+            assert(req.randomize() with { transfer == 1; });
+            finish_item(req);
+        end
+        
+        // Now run transactions where errors will be injected (starting from 3rd)
+        `uvm_info("ERROR_SEQ", "Running error injection transactions...", UVM_LOW)
+        repeat(10) begin  // Increased number for better error chances
+            req = apb_alpha_transaction::type_id::create("req");
+            start_item(req);
+            assert(req.randomize() with { transfer == 1; });
+            finish_item(req);
+        end
+        
+        `uvm_info("ERROR_SEQ", "=== Error Injection Sequence Completed ===", UVM_LOW)
+    endtask
+    
+endclass
+
+//=============================================================================
+// Error Injection Driver - Injects protocol violations using force/release
+//=============================================================================
+class apb_error_driver extends apb_alpha_driver;
+    `uvm_component_utils(apb_error_driver)
+    
+    // Error injection control
+    bit enable_psel_error = 0;
+    bit enable_addr_error = 0;
+    bit enable_wdata_error = 0;
+    int error_inject_count = 0;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        `uvm_info("ERR_DRV", "apb_error_driver constructor called", UVM_LOW)
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        
+        `uvm_info("ERR_DRV", "apb_error_driver build_phase called", UVM_LOW)
+        
+        // Get error injection configuration from config_db
+        uvm_config_db#(bit)::get(this, "", "enable_psel_error", enable_psel_error);
+        uvm_config_db#(bit)::get(this, "", "enable_addr_error", enable_addr_error);
+        uvm_config_db#(bit)::get(this, "", "enable_wdata_error", enable_wdata_error);
+        
+        `uvm_info("ERR_DRV", $sformatf("Config retrieved: PSEL=%0b, ADDR=%0b, WDATA=%0b", 
+                                      enable_psel_error, enable_addr_error, enable_wdata_error), UVM_LOW)
+        
+        if (enable_psel_error || enable_addr_error || enable_wdata_error)
+            `uvm_info("ERR_DRV", "Error Injection Driver initialized with error modes enabled", UVM_LOW)
+        else
+            `uvm_info("ERR_DRV", "WARNING: No error modes enabled!", UVM_LOW)
+    endfunction
+    
+    task run_phase(uvm_phase phase);
+        apb_alpha_transaction req;
+        
+        `uvm_info("ERR_DRV", "Error driver run_phase started - running sequence loop", UVM_LOW)
+        
+        // Initialize BFM slaves - call parent class setup
+        @(vif.driver_cb);
+        vif.driver_cb.pready0 <= 1;
+        vif.driver_cb.pready1 <= 1;
+        vif.driver_cb.pready2 <= 1;
+        vif.driver_cb.pready3 <= 1;
+        vif.driver_cb.pready4 <= 1;
+        
+        repeat(5) @(vif.driver_cb);
+        `uvm_info("ERR_DRV", "Error driver initialization completed", UVM_LOW)
+        
+        forever begin
+            `uvm_info("ERR_DRV", "Waiting for next sequence item...", UVM_LOW)
+            seq_item_port.get_next_item(req);
+            `uvm_info("ERR_DRV", "Received sequence item, calling drive_transaction()", UVM_LOW)
+            drive_transaction(req);
+            seq_item_port.item_done();
+        end
+    endtask
+    
+    // Override drive_transaction to inject errors
+    task drive_transaction(apb_alpha_transaction req);
+        error_inject_count++;
+        `uvm_info("ERR_DRV", $sformatf("Transaction %0d - Error flags: PSEL=%0b, ADDR=%0b, WDATA=%0b", 
+                                      error_inject_count, enable_psel_error, enable_addr_error, enable_wdata_error), UVM_LOW)
+        
+        // Setup BFM slave responses before transaction
+        setup_bfm_slaves(req);
+        
+        if (req.transfer) begin
+            // Drive transaction signals
+            @(vif.driver_cb);
+            vif.driver_cb.transfer <= 1;
+            vif.driver_cb.write    <= req.write;
+            vif.driver_cb.addr     <= req.addr;
+            vif.driver_cb.wdata    <= req.wdata;
+            
+            // Inject errors during transaction if enabled (from 3rd transaction)
+            `uvm_info("ERR_DRV", $sformatf("Checking error injection: count=%0d, PSEL enabled=%0b", 
+                                          error_inject_count, enable_psel_error), UVM_LOW)
+            if (error_inject_count >= 3) begin
+                if (enable_psel_error) begin
+                    `uvm_info("ERR_DRV", $sformatf("Transaction %0d: Injecting PSEL error", error_inject_count), UVM_LOW)
+                    inject_psel_onehot_error();
+                end
+                if (enable_addr_error) begin
+                    `uvm_info("ERR_DRV", $sformatf("Transaction %0d: Injecting Address error", error_inject_count), UVM_LOW)
+                    inject_address_stability_error();
+                end
+                if (enable_wdata_error) begin
+                    `uvm_info("ERR_DRV", $sformatf("Transaction %0d: Injecting WDATA error", error_inject_count), UVM_LOW)
+                    inject_wdata_stability_error();
+                end
+            end
+            
+            // Wait for transaction completion
+            wait(vif.driver_cb.ready == 1);
+            req.rdata = vif.driver_cb.rdata;
+            
+            // Deassert transfer after completion
+            @(vif.driver_cb);
+            vif.driver_cb.transfer <= 0;
+            
+            // Wait one more cycle for clean separation
+            @(vif.driver_cb);
+        end else begin
+            // Idle cycle
+            @(vif.driver_cb);
+            vif.driver_cb.transfer <= 0;
+        end
+    endtask
+    
+    // Inject PSEL one-hot violation
+    task inject_psel_onehot_error();
+        `uvm_info("ERR_DRV", ">>> INJECTING PSEL ONE-HOT VIOLATION <<<", UVM_LOW)
+        
+        // Force multiple PSELs active simultaneously at interface level
+        `uvm_info("ERR_DRV", "Forcing multiple PSEL signals active (one-hot violation)", UVM_LOW)
+        
+        // Direct force on interface signals for immediate effect
+        #1;
+        force apb_alpha_tb.apb_if.psel0 = 1'b1;
+        force apb_alpha_tb.apb_if.psel1 = 1'b1;
+        
+        // Hold for several clock cycles to ensure assertion sees it
+        repeat(5) @(vif.driver_cb);
+        
+        // Release forces
+        release apb_alpha_tb.apb_if.psel0;
+        release apb_alpha_tb.apb_if.psel1;
+        
+        `uvm_info("ERR_DRV", "PSEL one-hot violation injection completed", UVM_LOW)
+    endtask
+    
+    // Inject address stability violation
+    task inject_address_stability_error();
+        `uvm_info("ERR_DRV", ">>> INJECTING ADDRESS STABILITY VIOLATION <<<", UVM_LOW)
+        
+        // Wait for SETUP phase (PSEL active, PENABLE=0)
+        wait(vif.monitor_cb.psel0 || vif.monitor_cb.psel1 || vif.monitor_cb.psel2 || 
+             vif.monitor_cb.psel3 || vif.monitor_cb.psel4);
+        
+        `uvm_info("ERR_DRV", "SETUP phase detected, injecting address change", UVM_LOW)
+        
+        // Wait one more cycle to be in SETUP phase
+        @(vif.driver_cb);
+        
+        // Force address change during SETUP→ACCESS transition
+        `uvm_info("ERR_DRV", $sformatf("Forcing PADDR change: 0x%08h -> 0xDEADBEEF", vif.monitor_cb.paddr), UVM_LOW)
+        force apb_alpha_tb.u_dut.PADDR = 32'hDEADBEEF;
+        
+        // Keep address changed for multiple cycles
+        repeat(3) @(vif.driver_cb);
+        
+        // Release the force
+        release apb_alpha_tb.u_dut.PADDR;
+        
+        `uvm_info("ERR_DRV", "Address stability error injection completed", UVM_LOW)
+    endtask
+    
+    // Inject write data stability violation
+    task inject_wdata_stability_error();
+        `uvm_info("ERR_DRV", ">>> INJECTING WDATA STABILITY VIOLATION <<<", UVM_LOW)
+        
+        // Wait for ACCESS phase (PENABLE=1, PWRITE=1)
+        wait(vif.monitor_cb.penable && vif.monitor_cb.pwrite);
+        
+        `uvm_info("ERR_DRV", "ACCESS phase with WRITE detected, injecting data change", UVM_LOW)
+        
+        @(vif.driver_cb);
+        
+        // Force write data change during ACCESS phase
+        `uvm_info("ERR_DRV", $sformatf("Forcing PWDATA change: 0x%08h -> 0xBADD1234", vif.monitor_cb.pwdata), UVM_LOW)
+        force apb_alpha_tb.u_dut.PWDATA = 32'hBADD1234;
+        
+        // Keep data changed for multiple cycles during ACCESS
+        repeat(3) @(vif.driver_cb);
+        
+        // Release the force
+        release apb_alpha_tb.u_dut.PWDATA;
+        
+        `uvm_info("ERR_DRV", "WDATA stability error injection completed", UVM_LOW)
+    endtask
+    
+endclass
+
+//=============================================================================
+// Alpha Test Cases
+//=============================================================================
+class apb_alpha_smoke_test extends uvm_test;
+    `uvm_component_utils(apb_alpha_smoke_test)
+    
+    apb_alpha_env env;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        env = apb_alpha_env::type_id::create("env", this);
+    endfunction
+    
+    function void end_of_elaboration_phase(uvm_phase phase);
+        super.end_of_elaboration_phase(phase);
+        `uvm_info("TOPOLOGY", "=== UVM Testbench Hierarchy ===", UVM_LOW)
+        uvm_top.print_topology();
+    endfunction
+    
+    task run_phase(uvm_phase phase);
+        apb_alpha_smoke_sequence seq;
+        
+        phase.raise_objection(this);
+        
+        seq = apb_alpha_smoke_sequence::type_id::create("seq");
+        seq.num_transactions = 20; // Increase transactions for better coverage
+        seq.start(env.m_agent.m_sequencer); // Access sequencer through agent
+        
+        phase.drop_objection(this);
+    endtask
+    
+endclass
+
+class apb_alpha_protocol_test extends uvm_test;
+    `uvm_component_utils(apb_alpha_protocol_test)
+    
+    apb_alpha_env env;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        env = apb_alpha_env::type_id::create("env", this);
+    endfunction
+    
+    function void end_of_elaboration_phase(uvm_phase phase);
+        super.end_of_elaboration_phase(phase);
+        `uvm_info("TOPOLOGY", "=== UVM Testbench Hierarchy ===", UVM_LOW)
+        uvm_top.print_topology();
+    endfunction
+    
+    task run_phase(uvm_phase phase);
+        apb_alpha_smoke_sequence seq;
+        
+        phase.raise_objection(this);
+        
+        seq = apb_alpha_smoke_sequence::type_id::create("seq");
+        seq.num_transactions = 20; // Increase transactions for better coverage
+        seq.start(env.m_agent.m_sequencer); // Access sequencer through agent
+        
+        phase.drop_objection(this);
+    endtask
+    
+endclass
+
+//=============================================================================
+// Error Injection Test - Validates assertion checking capability
+//=============================================================================
+// Purpose: Intentionally inject protocol violations to verify that assertions
+//          properly detect and report errors. This validates the TB infrastructure.
+// Approach: Use UVM Factory Override to replace normal driver with error driver
+//=============================================================================
+class apb_alpha_error_test extends uvm_test;
+    `uvm_component_utils(apb_alpha_error_test)
+    
+    apb_alpha_env env;
+    
+    // Select which error to inject
+    typedef enum {
+        PSEL_ONEHOT_ERROR,      // Violate PSEL one-hot rule
+        ADDR_STABILITY_ERROR,   // Violate address stability
+        WDATA_STABILITY_ERROR,  // Violate write data stability
+        ALL_ERRORS              // Inject all error types
+    } error_mode_e;
+    
+    error_mode_e error_mode = ALL_ERRORS;
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+    
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  APB ERROR INJECTION TEST STARTING", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  Purpose: Validate assertion checking", UVM_LOW)
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        
+        //=====================================================================
+        // KEY UVM CONCEPT: Factory Override
+        //=====================================================================
+        // Replace the normal driver with error injection driver
+        // This demonstrates UVM's powerful component substitution mechanism
+        //=====================================================================
+        apb_alpha_driver::type_id::set_type_override(apb_error_driver::get_type());
+        `uvm_info("ERROR_TEST", "Factory Override: apb_alpha_driver -> apb_error_driver", UVM_LOW)
+        
+        // Configure which errors to inject via config_db
+        case (error_mode)
+            PSEL_ONEHOT_ERROR: begin
+                uvm_config_db#(bit)::set(this, "*", "enable_psel_error", 1);
+                `uvm_info("ERROR_TEST", "Error Mode: PSEL ONE-HOT VIOLATION", UVM_LOW)
+            end
+            ADDR_STABILITY_ERROR: begin
+                uvm_config_db#(bit)::set(this, "*", "enable_addr_error", 1);
+                `uvm_info("ERROR_TEST", "Error Mode: ADDRESS STABILITY VIOLATION", UVM_LOW)
+            end
+            WDATA_STABILITY_ERROR: begin
+                uvm_config_db#(bit)::set(this, "*", "enable_wdata_error", 1);
+                `uvm_info("ERROR_TEST", "Error Mode: WDATA STABILITY VIOLATION", UVM_LOW)
+            end
+            ALL_ERRORS: begin
+                uvm_config_db#(bit)::set(this, "*", "enable_psel_error", 1);
+                uvm_config_db#(bit)::set(this, "*", "enable_addr_error", 1);
+                uvm_config_db#(bit)::set(this, "*", "enable_wdata_error", 1);
+                `uvm_info("ERROR_TEST", "Error Mode: ALL PROTOCOL VIOLATIONS", UVM_LOW)
+            end
+        endcase
+        
+        env = apb_alpha_env::type_id::create("env", this);
+    endfunction
+    
+    function void end_of_elaboration_phase(uvm_phase phase);
+        super.end_of_elaboration_phase(phase);
+        `uvm_info("TOPOLOGY", "=== UVM Testbench Hierarchy (Error Test) ===", UVM_LOW)
+        uvm_top.print_topology();
+        
+        // Verify override was successful
+        `uvm_info("ERROR_TEST", "Checking Factory Override status...", UVM_LOW)
+        uvm_factory::get().print();
+    endfunction
+    
+    task run_phase(uvm_phase phase);
+        apb_error_injection_sequence seq;
+        
+        phase.raise_objection(this);
+        
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  RUNNING ERROR INJECTION SEQUENCE", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  Expected: Assertion errors will occur", UVM_LOW)
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        
+        seq = apb_error_injection_sequence::type_id::create("seq");
+        seq.start(env.m_agent.m_sequencer);
+        
+        // Wait a bit for any pending assertions to fire
+        #100;
+        
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  ERROR INJECTION TEST COMPLETED", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  Check log for assertion failures", UVM_LOW)
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        
+        phase.drop_objection(this);
+    endtask
+    
+    function void report_phase(uvm_phase phase);
+        super.report_phase(phase);
+        
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  ERROR INJECTION TEST SUMMARY", UVM_LOW)
+        `uvm_info("ERROR_TEST", "----------------------------------------", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  If you see assertion errors above,", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  the TB infrastructure is WORKING!", UVM_LOW)
+        `uvm_info("ERROR_TEST", "----------------------------------------", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  This test validates that:", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  1. Assertions detect protocol errors", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  2. Factory Override works correctly", UVM_LOW)
+        `uvm_info("ERROR_TEST", "  3. Error injection mechanism is valid", UVM_LOW)
+        `uvm_info("ERROR_TEST", "========================================", UVM_LOW)
+    endfunction
+    
+endclass
+
+//=============================================================================
+// Individual Error Tests (for targeted validation)
+//=============================================================================
+
+// Test only PSEL one-hot violation
+class apb_psel_error_test extends apb_alpha_error_test;
+    `uvm_component_utils(apb_psel_error_test)
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        error_mode = PSEL_ONEHOT_ERROR;
+    endfunction
+endclass
+
+// Test only address stability violation
+class apb_addr_error_test extends apb_alpha_error_test;
+    `uvm_component_utils(apb_addr_error_test)
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        error_mode = ADDR_STABILITY_ERROR;
+    endfunction
+endclass
+
+// Test only write data stability violation  
+class apb_wdata_error_test extends apb_alpha_error_test;
+    `uvm_component_utils(apb_wdata_error_test)
+    
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        error_mode = WDATA_STABILITY_ERROR;
+    endfunction
+endclass
+
+//=============================================================================
+// Alpha Test Top Module (Unified)
+//=============================================================================
+module apb_alpha_tb;
+    
+    //=========================================================================
+    // Clock and Reset generation
+    //=========================================================================
+    logic clk;
+    logic rst_n;
+    
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk; // 100MHz clock
+    end
+    
+    initial begin
+        rst_n = 0;
+        #100 rst_n = 1;
+    end
+    
+    //=========================================================================
+    // Interface instantiation
+    //=========================================================================
+    apb_alpha_interface apb_if(clk);
+    
+    // Connect reset signal to interface
+    assign apb_if.preset_n = rst_n;
+    
+    //=========================================================================
+    // DUT instantiation - APB Master only
+    //=========================================================================
+    APB_Master u_dut (
+        .PCLK     (clk),
+        .PRESET   (~apb_if.preset_n),
+        .transfer (apb_if.transfer),
+        .write    (apb_if.write),
+        .addr     (apb_if.addr),
+        .wdata    (apb_if.wdata),
+        .rdata    (apb_if.rdata),
+        .ready    (apb_if.ready),
+        .PADDR    (apb_if.paddr),
+        .PWRITE   (apb_if.pwrite),
+        .PENABLE  (apb_if.penable),
+        .PWDATA   (apb_if.pwdata),
+        .PSEL0    (apb_if.psel0),
+        .PSEL1    (apb_if.psel1),
+        .PSEL2    (apb_if.psel2),
+        .PSEL3    (apb_if.psel3),
+        .PSEL4    (apb_if.psel4),
+        .PRDATA0  (apb_if.prdata0),
+        .PRDATA1  (apb_if.prdata1),
+        .PRDATA2  (apb_if.prdata2),
+        .PRDATA3  (apb_if.prdata3),
+        .PRDATA4  (apb_if.prdata4),
+        .PREADY0  (apb_if.pready0),
+        .PREADY1  (apb_if.pready1),
+        .PREADY2  (apb_if.pready2),
+        .PREADY3  (apb_if.pready3),
+        .PREADY4  (apb_if.pready4)
+    );
+    
+    //=========================================================================
+    // APB Protocol Assertions (Integrated)
+    //=========================================================================
+    
+    // APB FSM State Assertions
+    property apb_setup_to_access;
+        @(posedge clk) disable iff (!apb_if.preset_n)
+        (apb_if.psel0 || apb_if.psel1 || apb_if.psel2 || apb_if.psel3 || apb_if.psel4) 
+        && !apb_if.penable |=> apb_if.penable;
+    endproperty
+    
+    property apb_address_stable_during_setup;
+        @(posedge clk) disable iff (!apb_if.preset_n)
+        (apb_if.psel0 || apb_if.psel1 || apb_if.psel2 || apb_if.psel3 || apb_if.psel4) 
+        |=> $stable(apb_if.paddr);
+    endproperty
+    
+    property apb_write_data_stable;
+        @(posedge clk) disable iff (!apb_if.preset_n)
+        apb_if.pwrite && apb_if.penable |-> $stable(apb_if.pwdata);
+    endproperty
+    
+    property apb_one_hot_psel;
+        @(posedge clk) disable iff (!apb_if.preset_n)
+        $onehot0({apb_if.psel0, apb_if.psel1, apb_if.psel2, apb_if.psel3, apb_if.psel4});
+    endproperty
+    
+    // Assertion instantiation
+    assert_setup_to_access: assert property (apb_setup_to_access)
+        else `uvm_error("APB_PROTOCOL", "SETUP to ACCESS transition failed")
+    
+    assert_address_stable: assert property (apb_address_stable_during_setup)
+        else `uvm_error("APB_PROTOCOL", "Address not stable during SETUP")
+    
+    assert_wdata_stable: assert property (apb_write_data_stable)
+        else `uvm_error("APB_PROTOCOL", "Write data not stable during ACCESS")
+    
+    assert_psel_onehot: assert property (apb_one_hot_psel)
+        else `uvm_error("APB_PROTOCOL", "PSEL signals not one-hot")
+    
+    //=========================================================================
+    // APB Protocol Coverage (Integrated)
+    //=========================================================================
+    covergroup apb_protocol_cg @(posedge clk);
+        option.per_instance = 1;
+        option.name = "apb_alpha_protocol_cov";
+        
+        // Slave selection coverage (includes IDLE state)
+        psel_coverage: coverpoint {apb_if.psel0, apb_if.psel1, apb_if.psel2, apb_if.psel3, apb_if.psel4} {
+            bins ram_sel  = {5'b00001};
+            bins gpo_sel  = {5'b00010};
+            bins gpi_sel  = {5'b00100};
+            bins gpio_sel = {5'b01000};
+            bins uart_sel = {5'b10000};
+            bins no_sel   = {5'b00000};  // IDLE state
+        }
+        
+        // APB phase indicator
+        penable_coverage: coverpoint apb_if.penable;
+        
+        // Read/Write operation
+        pwrite_coverage: coverpoint apb_if.pwrite;
+        
+        // FSM state transitions: PSEL × PENABLE cross coverage
+        // NOTE: no_sel && penable=1 is IMPOSSIBLE in APB protocol
+        //       PENABLE can only be asserted when PSEL is active (SETUP→ACCESS)
+        //       This is excluded via ignore_bins as per functional coverage best practice
+        fsm_states: cross psel_coverage, penable_coverage {
+            // APB Protocol: PENABLE=1 requires active PSEL
+            // no_sel(IDLE) with PENABLE=1 violates protocol - physically impossible
+            ignore_bins impossible_state = binsof(psel_coverage.no_sel) && binsof(penable_coverage) intersect {1};
+        }
+        
+        // Address range coverage (which slave region is accessed)
+        addr_range: coverpoint apb_if.paddr[15:12] {
+            bins ram_range  = {4'h0};   // 0x1000_0xxx
+            bins gpo_range  = {4'h1};   // 0x1000_1xxx
+            bins gpi_range  = {4'h2};   // 0x1000_2xxx
+            bins gpio_range = {4'h3};   // 0x1000_3xxx
+            bins uart_range = {4'h4};   // 0x1000_4xxx
+        }
+        
+        // Operation type coverage: Read/Write for each slave region
+        operation_cross: cross addr_range, pwrite_coverage;
+    endgroup
+    
+    apb_protocol_cg alpha_cov;
+    
+    initial begin
+        alpha_cov = new();
+    end
+    
+    //=========================================================================
+    // UVM testbench initialization
+    //=========================================================================
+    initial begin
+        // Set interface in config_db
+        uvm_config_db#(virtual apb_alpha_interface)::set(
+            uvm_root::get(), "*", "vif", apb_if);
+        
+        // Enable waveform dumping
+        $fsdbDumpfile("apb_alpha_waves.fsdb");
+        $fsdbDumpvars(0, apb_alpha_tb);
+        
+        // Run the test
+        run_test();
+    end
+    
+    //=========================================================================
+    // Simulation timeout and final report
+    //=========================================================================
+    initial begin
+        #10000; // 10us timeout for smoke test
+        `uvm_info("TIMEOUT", "Simulation completed normally", UVM_LOW)
+        $finish;
+    end
+    
+    final begin
+        `uvm_info("ALPHA_TB", $sformatf("Alpha Test Coverage: %0.2f%%", alpha_cov.get_coverage()), UVM_LOW)
+    end
+    
+endmodule

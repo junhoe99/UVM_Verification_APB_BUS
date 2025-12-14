@@ -1,0 +1,231 @@
+#=============================================================================
+# APB Project Makefile - VCS/Verdi Environment (Unified TB Structure)
+#=============================================================================
+
+# Directory Definitions
+RTL_DIR 	= ./rtl/
+TB_DIR 		= ./tb/
+BUILD_DIR 	= ./build/
+
+# Tool Paths
+VCS         = vcs
+VERDI       = verdi
+
+# RTL Source Files (APB System Only)
+RTL_FILES 	= $(RTL_DIR)defines.sv \
+			  $(RTL_DIR)APB_System.sv \
+			  $(RTL_DIR)APB_Master.sv \
+			  $(RTL_DIR)RAM.sv \
+			  $(RTL_DIR)GPO.sv \
+			  $(RTL_DIR)GPI.sv \
+			  $(RTL_DIR)GPIO.sv \
+			  $(RTL_DIR)uart_fifo_loopback.sv
+
+# Alpha Test Configuration (Unit Level - APB_Master)
+# Unified TB: Single file contains interface, TB, assertions, coverage, and top module
+ALPHA_TB       = $(TB_DIR)apb_alpha_tb.sv
+ALPHA_TEST     = apb_alpha_smoke_test
+ALPHA_MODULE   = apb_alpha_tb
+
+# Beta Test Configuration (System Level - APB_System)
+# Unified TB: Single file contains interface, TB, assertions, coverage, and top module
+BETA_TB        = $(TB_DIR)apb_beta_tb.sv
+BETA_TEST      = apb_beta_iot_test
+BETA_MODULE    = apb_beta_tb
+
+# VCS Compilation Options
+COMP_OPT = -full64 -sverilog -timescale=1ns/100ps \
+           -ntb_opts uvm-1.2 \
+           -debug_access+all -kdb -lca \
+           -no_elab_opt -debug_region+cell \
+           -l $(BUILD_DIR)comp.log \
+           +incdir+$(RTL_DIR) +incdir+$(TB_DIR)
+
+# Alpha-specific compilation options
+ALPHA_COMP_OPT = $(COMP_OPT) -o $(BUILD_DIR)alpha_simv -top $(ALPHA_MODULE)
+
+# Beta-specific compilation options  
+BETA_COMP_OPT = $(COMP_OPT) -o $(BUILD_DIR)beta_simv -top $(BETA_MODULE)
+
+# Alpha Simulation Options
+ALPHA_FSDB    = $(BUILD_DIR)alpha_wave.fsdb
+ALPHA_SIMV    = $(BUILD_DIR)alpha_simv
+ALPHA_SIMV_OPT = +UVM_TESTNAME=$(ALPHA_TEST) \
+                 -l $(BUILD_DIR)alpha_simv.log \
+                 +fsdbfile+$(ALPHA_FSDB) \
+                 +UVM_VERBOSITY=UVM_LOW
+
+# Beta Simulation Options
+BETA_FSDB     = $(BUILD_DIR)beta_wave.fsdb
+BETA_SIMV     = $(BUILD_DIR)beta_simv  
+BETA_SIMV_OPT = +UVM_TESTNAME=$(BETA_TEST) \
+                -l $(BUILD_DIR)beta_simv.log \
+                +fsdbfile+$(BETA_FSDB) \
+                +UVM_VERBOSITY=UVM_LOW
+
+#=============================================================================
+# Make Targets
+#=============================================================================
+
+.PHONY : all help alpha beta vcs simv verdi clean veryclean check
+
+# Default target - compile and simulate alpha
+all : alpha
+
+# Alpha Test - Unit Level APB_Controller Verification
+alpha : alpha_compile alpha_sim
+
+# Beta Test - System Level APB_System Verification  
+beta : beta_compile beta_sim
+
+# Help information
+help:
+	@echo "==================================================================="
+	@echo "APB Project Makefile - Available Targets (Unified TB Structure)"
+	@echo "==================================================================="
+	@echo "Main Targets:"
+	@echo "  make alpha       - Alpha Test: APB_Master unit verification"
+	@echo "  make beta        - Beta Test: APB_System integration verification"
+	@echo "  make error       - Error Test: Validate assertion checking"
+	@echo "  make all         - Run Alpha test (default)"
+	@echo ""
+	@echo "Individual Stages:"
+	@echo "  make alpha_compile   - Compile Alpha testbench only"
+	@echo "  make alpha_sim       - Run Alpha simulation only"
+	@echo "  make beta_compile    - Compile Beta testbench only"
+	@echo "  make beta_sim        - Run Beta simulation only"
+	@echo ""
+	@echo "Test Selection (use with alpha_sim or beta_sim):"
+	@echo "  Alpha Tests: apb_alpha_smoke_test, apb_alpha_protocol_test"
+	@echo "  Error Tests: apb_alpha_error_test, apb_psel_error_test,"
+	@echo "               apb_addr_error_test, apb_wdata_error_test"
+	@echo "  Beta Tests:  apb_beta_init_test, apb_beta_iot_test, apb_beta_stress_test"
+	@echo "  Example: make alpha_sim ALPHA_TEST=apb_alpha_protocol_test"
+	@echo "           make error_sim ERROR_TEST=apb_psel_error_test"
+	@echo ""
+	@echo "Utilities:"
+	@echo "  make alpha_verdi     - Open Alpha waveform in Verdi"
+	@echo "  make beta_verdi      - Open Beta waveform in Verdi"
+	@echo "  make clean           - Remove build files"
+	@echo "  make check           - Check tool availability"
+	@echo ""
+	@echo "Test Descriptions:"
+	@echo "  Alpha: APB_Master protocol verification (bring-up)"
+	@echo "         - Includes APB protocol assertions"
+	@echo "         - Includes FSM state coverage"
+	@echo "  Error: Assertion validation (factory override)"
+	@echo "         - Intentionally injects protocol violations"
+	@echo "         - Validates TB infrastructure catches errors"
+	@echo "  Beta:  APB_System IoT scenarios (integration)"
+	@echo "         - Includes system-level assertions"
+	@echo "         - Includes peripheral access coverage"
+	@echo "==================================================================="
+
+# Tool availability check
+check:
+	@echo "Checking tool availability..."
+	@command -v $(VCS) >/dev/null 2>&1 || { \
+	  echo "ERROR: VCS '$(VCS)' not found in PATH"; exit 127; }
+	@command -v $(VERDI) >/dev/null 2>&1 || { \
+	  echo "ERROR: Verdi '$(VERDI)' not found in PATH"; exit 127; }
+	@echo "Tool check completed."
+
+# Alpha Test Compilation (Unified TB)
+alpha_compile : check
+	@echo "Compiling Alpha Test (APB_Master Unit Verification)..."
+	@echo "Using unified TB: $(ALPHA_TB)"
+	@mkdir -p $(BUILD_DIR)
+	$(VCS) $(RTL_FILES) $(ALPHA_TB) $(ALPHA_COMP_OPT)
+	@echo "Alpha compilation completed. Executable: $(ALPHA_SIMV)"
+
+# Alpha Test Simulation
+alpha_sim : 
+	@echo "Running Alpha Test simulation..."
+	@echo "Test: $(ALPHA_TEST) - APB_Master unit verification"
+	$(ALPHA_SIMV) $(ALPHA_SIMV_OPT)
+	@echo "Alpha simulation completed. Log: $(BUILD_DIR)alpha_simv.log"
+	@echo "Alpha waveform: $(ALPHA_FSDB)"
+
+#=============================================================================
+# Error Injection Test Configuration
+#=============================================================================
+# Purpose: Validate assertion checking by intentionally injecting protocol errors
+# Uses: Factory Override to replace normal driver with error injection driver
+#=============================================================================
+ERROR_TEST = apb_alpha_error_test
+ERROR_FSDB = $(BUILD_DIR)error_wave.fsdb
+ERROR_SIMV_OPT = +UVM_TESTNAME=$(ERROR_TEST) \
+                 -l $(BUILD_DIR)error_simv.log \
+                 +fsdbfile+$(ERROR_FSDB) \
+                 +UVM_VERBOSITY=UVM_LOW
+
+# Error Test - Full compile and simulate
+error : alpha_compile error_sim
+
+# Error Test Simulation (uses alpha compiled binary)
+error_sim :
+	@echo "=============================================="
+	@echo "Running Error Injection Test..."
+	@echo "Purpose: Validate assertion checking capability"
+	@echo "Test: $(ERROR_TEST)"
+	@echo "=============================================="
+	$(ALPHA_SIMV) $(ERROR_SIMV_OPT)
+	@echo "=============================================="
+	@echo "Error test completed. Check log for assertion failures."
+	@echo "Log: $(BUILD_DIR)error_simv.log"
+	@echo "=============================================="
+	@echo "If you see assertion errors, the TB is working correctly!"
+
+# Beta Test Compilation (Unified TB)
+beta_compile : check
+	@echo "Compiling Beta Test (APB_System Integration Verification)..."
+	@echo "Using unified TB: $(BETA_TB)"
+	@mkdir -p $(BUILD_DIR)
+	$(VCS) $(RTL_FILES) $(BETA_TB) $(BETA_COMP_OPT)
+	@echo "Beta compilation completed. Executable: $(BETA_SIMV)"
+
+# Beta Test Simulation
+beta_sim :
+	@echo "Running Beta Test simulation..."
+	@echo "Test: $(BETA_TEST) - APB_System integration verification"
+	$(BETA_SIMV) $(BETA_SIMV_OPT)
+	@echo "Beta simulation completed. Log: $(BUILD_DIR)beta_simv.log"
+	@echo "Beta waveform: $(BETA_FSDB)"
+
+# Legacy targets for backward compatibility
+vcs : alpha_compile
+simv : alpha_sim
+
+# Alpha Verdi Waveform Viewer
+alpha_verdi:
+	@echo "Opening Alpha Test waveform in Verdi..."
+	@if [ -f "$(ALPHA_FSDB)" ]; then \
+		$(VERDI) -dbdir $(BUILD_DIR)alpha_simv.daidir -ssf $(ALPHA_FSDB) & \
+	else \
+		echo "ERROR: Alpha waveform file $(ALPHA_FSDB) not found."; \
+		echo "Run 'make alpha' first to generate waveforms."; \
+	fi
+
+# Beta Verdi Waveform Viewer
+beta_verdi:
+	@echo "Opening Beta Test waveform in Verdi..."
+	@if [ -f "$(BETA_FSDB)" ]; then \
+		$(VERDI) -dbdir $(BUILD_DIR)beta_simv.daidir -ssf $(BETA_FSDB) & \
+	else \
+		echo "ERROR: Beta waveform file $(BETA_FSDB) not found."; \
+		echo "Run 'make beta' first to generate waveforms."; \
+	fi
+
+# Legacy Verdi target (defaults to Alpha)
+verdi: alpha_verdi
+
+# Clean build files
+clean:
+	@echo "Cleaning build files..."
+	rm -rf csrc *.key *.h $(BUILD_DIR) simv* *.daidir *.log ucli.key vc_hdrs.h DVEfiles verdiLog novas* urgReport *.vdb
+	rm -rf alpha_simv* beta_simv* *_simv.daidir *.fsdb
+
+# Very clean - remove all generated files
+veryclean: clean
+	@echo "Removing all generated files..."
+	rm -rf .vscode .idea Thumbs.db .DS_Store .nvim
